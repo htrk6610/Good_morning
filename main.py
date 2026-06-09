@@ -1,3 +1,4 @@
+from aiohttp import web
 import asyncio
 import logging
 import os
@@ -11,31 +12,39 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 TOKEN = os.getenv("BOT_TOKEN")
 if TOKEN:
-    TOKEN = TOKEN.strip()  # <- ВОТ ЭТА МАГИЧЕСКАЯ СТРОЧКА спасает от пробелов
+    TOKEN = TOKEN.strip().replace('"', '').replace("'", "")
+    if "=" in TOKEN:
+        TOKEN = TOKEN.split("=")[-1].strip()
+    TOKEN = TOKEN.replace(" ", "")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL:
-    DATABASE_URL = DATABASE_URL.strip()
+    DATABASE_URL = DATABASE_URL.strip().replace('"', '').replace("'", "")
+    if "=" in DATABASE_URL and not DATABASE_URL.startswith("postgres"):
+        DATABASE_URL = DATABASE_URL.split("=")[-1].strip()
+    DATABASE_URL = DATABASE_URL.replace(" ", "")
+
+# Хак для библиотеки asyncpg (требуется схема postgres://)
+if DATABASE_URL and DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgres://", 1)
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token=TOKEN)
+# Чистая и стандартная инициализация
+bot = None
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
-
-# Переменная для хранения пула соединений с БД
 db_pool = None
 
 # --- БАЗА ДАННЫХ (POSTGRESQL) ---
 async def init_db():
     global db_pool
-    # Создаем пул соединений к Supabase
-    db_pool = await asyncpg.create_pool(DATABASE_URL)
-    
+    # Отключаем кэш запросов для корректной работы пулера Neon
+    db_pool = await asyncpg.create_pool(DATABASE_URL, statement_cache_size=0)
+
     async with db_pool.acquire() as conn:
-        # В Postgres лучше использовать BIGINT для Telegram ID и BOOLEAN вместо 0/1
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -71,7 +80,6 @@ async def get_user_subs(user_id: int):
         return dict(row) if row else None
 
 async def toggle_sub(user_id: int, column: str):
-    # Безопасно внедряем имя колонки, так как оно приходит только из нашего контролируемого инлайн-меню
     async with db_pool.acquire() as conn:
         await conn.execute(f'UPDATE users SET {column} = NOT {column} WHERE user_id = $1', user_id)
 
@@ -102,7 +110,7 @@ async def get_cat_url():
 async def send_scheduled_cat(text: str, column_name: str):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(f'SELECT user_id FROM users WHERE {column_name} = TRUE')
-    
+        
     if not rows:
         return
     
@@ -158,7 +166,7 @@ async def manual_cat_text(message: types.Message):
     url = await get_cat_url()
     await message.answer_photo(url, caption="Твій позачерговий кіт!")
 
-@dp.message(F.text == "⚙️ Налаштування підписок")
+@dp.message(F.text == "⚙️ Мої підписки")
 async def settings_menu(message: types.Message):
     await upsert_user(message.from_user)
     user_data = await get_user_subs(message.from_user.id)
@@ -240,11 +248,16 @@ async def admin_broadcast(message: types.Message):
 
 # --- ЗАПУСК ---
 async def main():
+    global bot
     if not TOKEN or not DATABASE_URL:
         logging.error("Переменные окружения BOT_TOKEN или DATABASE_URL не заданы!")
         return
 
+    # Подключаем базу данных
     await init_db()
+    
+    # Инициализируем бота стандартным способом строго внутри запущенного event loop
+    bot = Bot(token=TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
     
     jobs = [
@@ -263,6 +276,24 @@ async def main():
         scheduler.add_job(send_scheduled_cat, 'cron', hour=int(h), minute=int(m), args=[msg, column])
 
     scheduler.start()
+    
+    logging.info("Бот успешно запускается, открываем соединение с Telegram...")
+    
+# --- ЗАГЛУШКА ДЛЯ RENDER (HEALTH CHECK) ---
+    async def handle_health(request):
+        return web.Response(text="Bot is alive and kicking!")
+
+    app = web.Application()
+    app.router.add_get('/', handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Render сам выдает порт в переменные окружения, по умолчанию берем 10000
+    render_port = int(os.getenv("PORT", "10000"))
+    site = web.TCPSite(runner, "0.0.0.0", render_port)
+    await site.start()
+    logging.info(f"Фоновый веб-сервер для Render запущен на порту {render_port}")
+    
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
