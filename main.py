@@ -9,14 +9,15 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
-# На сервере мы укажем эти переменные, в код токены больше не пишем!
 TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+if TOKEN:
+    TOKEN = TOKEN.strip()  # <- ВОТ ЭТА МАГИЧЕСКАЯ СТРОЧКА спасает от пробелов
 
-# Небольшой хак: asyncpg требует, чтобы строка начиналась с postgres://, а не postgresql://
-if DATABASE_URL and DATABASE_URL.startswith("postgresql://"):
-    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgres://", 1)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.strip()
+
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 logging.basicConfig(level=logging.INFO)
 
