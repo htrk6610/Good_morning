@@ -1,0 +1,4 @@
+aiogram
+apscheduler
+aiohttp
+asyncpg
