@@ -188,6 +188,13 @@ async def toggle_all_handler(callback: types.CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=get_settings_keyboard(user_data))
     await callback.answer("Настройки обновлены!")
 
+@dp.message()
+async def echo_all_unhandled(message: types.Message):
+    await message.answer(
+        f"🤖 Омнисія почув твій меседж: *'{message.text}'*, але я розумію тільки мову кітов!\n\n"
+        f"Використовуй меню знизу або команду /start",
+        parse_mode="Markdown"
+
 # --- АДМИН ПАНЕЛЬ ---
 @dp.message(Command("users"), F.from_user.id == ADMIN_ID)
 async def admin_list_users(message: types.Message):
