@@ -253,7 +253,6 @@ async def echo_all_unhandled(message: types.Message):
         f"Використовуй меню знизу або команду /start",
         parse_mode="Markdown"
     )
-
 # --- ЗАПУСК ---
 async def main():
     global bot
