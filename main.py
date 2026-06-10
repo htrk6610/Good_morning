@@ -194,6 +194,7 @@ async def echo_all_unhandled(message: types.Message):
         f"🤖 Омнисія почув твій меседж: *'{message.text}'*, але я розумію тільки мову кітов!\n\n"
         f"Використовуй меню знизу або команду /start",
         parse_mode="Markdown"
+    )
 
 # --- АДМИН ПАНЕЛЬ ---
 @dp.message(Command("users"), F.from_user.id == ADMIN_ID)
