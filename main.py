@@ -202,8 +202,7 @@ async def admin_list_users(message: types.Message):
     for row in rows:
         username_str = f"@{row['username']}" if row['username'] else "Нет юзернейма"
         text += f"ID: `{row['user_id']}` | {username_str} | {row['first_name']}\n"
-        
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text)  # Просто убрали parse_mode
 
 @dp.message(Command("send"), F.from_user.id == ADMIN_ID)
 async def admin_send_private(message: types.Message):
