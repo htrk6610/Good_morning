@@ -324,8 +324,7 @@ async def admin_list_users(message: types.Message):
     for row in rows:
         username_str = f"@{row['username']}" if row['username'] else "Нет юзернейма"
         text += f"ID: `{row['user_id']}` | {username_str} | {row['first_name']}\n"
-        
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text)  # Просто убрали parse_mode
 
 @dp.message(Command("send"), F.from_user.id == ADMIN_ID)
 async def admin_send_private(message: types.Message):
@@ -368,6 +367,13 @@ async def admin_broadcast(message: types.Message):
             pass
     await message.answer(f"Рассылка завершена. Доставлено: {count} юзерам.")
 
+@dp.message()
+async def echo_all_unhandled(message: types.Message):
+    await message.answer(
+        f"🤖 Омнисія почув твій меседж: *'{message.text}'*, але я розумію тільки мову кітов!\n\n"
+        f"Використовуй меню знизу або команду /start",
+        parse_mode="Markdown"
+    )
 # --- ЗАПУСК ---
 async def main():
     global bot
@@ -382,7 +388,20 @@ async def main():
     bot = Bot(token=TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
     
-    scheduler.add_job(send_personalized_notifications, 'cron', minute='*')
+    jobs = [
+        ("04:30", "Доброго ранку! Прокидайся, котики вже не сплять! ☀️", "sub_morning"),
+        ("04:45", "Час сніданку. Кіт схвалює твою вівсянку! 🥣", "sub_breakfast"),
+        ("07:45", "Час ланчу! Перекуси, поки кіт не з'їв твій кактус. ☕", "sub_lunch"),
+        ("11:00", "ОБІД! Пора підкріпитися серйозно. 🍲", "sub_obed"),
+        ("13:00", "Полуденок. Час чаю та легких чухань за вушком. 🥨", "sub_snack"),
+        ("14:30", "Вечеря подана! Смачного. 🍗", "sub_supper"),
+        ("18:00", "Друга вечеря (нічний дожор). Ми нікому не скажемо. 🍕", "sub_second_supper"),
+        ("20:00", "На добраніч! Солодких снів. 🌙", "sub_night")
+    ]
+
+    for time, msg, column in jobs:
+        h, m = time.split(':')
+        scheduler.add_job(send_scheduled_cat, 'cron', hour=int(h), minute=int(m), args=[msg, column])
 
     scheduler.start()
     
