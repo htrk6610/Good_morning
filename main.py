@@ -4,6 +4,7 @@ import logging
 import os
 import aiohttp
 import asyncpg
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
@@ -29,6 +30,29 @@ if DATABASE_URL and DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgres://", 1)
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+BOT_VERSION = "1.2"
+
+NOTIFICATION_SETTINGS = {
+    "sub_morning": ("Ранок", "time_morning", "07:30"),
+    "sub_night": ("Ніч", "time_night", "23:00"),
+    "sub_breakfast": ("Сніданок", "time_breakfast", "07:45"),
+    "sub_lunch": ("Ланч", "time_lunch", "10:45"),
+    "sub_obed": ("Обід", "time_obed", "14:00"),
+    "sub_snack": ("Полуденок", "time_snack", "16:00"),
+    "sub_supper": ("Вечеря", "time_supper", "17:30"),
+    "sub_second_supper": ("Нічний жор", "time_second_supper", "21:00"),
+}
+NOTIFICATION_MESSAGES = {
+    "sub_morning": "Доброго ранку! Прокидайся, котики вже не сплять! ☀️",
+    "sub_breakfast": "Час сніданку. Кіт схвалює твою вівсянку! 🥣",
+    "sub_lunch": "Час ланчу! Перекуси, поки кіт не з'їв твій кактус. ☕",
+    "sub_obed": "ОБІД! Пора підкріпитися серйозно. 🍲",
+    "sub_snack": "Полуденок. Час чаю та легких чухань за вушком. 🥨",
+    "sub_supper": "Вечеря подана! Смачного. 🍗",
+    "sub_second_supper": "Друга вечеря (нічний дожор). Ми нікому не скажемо. 🍕",
+    "sub_night": "На добраніч! Солодких снів. 🌙",
+}
+pending_time_settings = {}
 
 logging.basicConfig(level=logging.INFO)
 
@@ -59,9 +83,21 @@ async def init_db():
                 sub_obed BOOLEAN DEFAULT FALSE,
                 sub_snack BOOLEAN DEFAULT FALSE,
                 sub_supper BOOLEAN DEFAULT FALSE,
-                sub_second_supper BOOLEAN DEFAULT FALSE
+                sub_second_supper BOOLEAN DEFAULT FALSE,
+                time_morning TEXT NOT NULL DEFAULT '07:30',
+                time_night TEXT NOT NULL DEFAULT '23:00',
+                time_breakfast TEXT NOT NULL DEFAULT '07:45',
+                time_lunch TEXT NOT NULL DEFAULT '10:45',
+                time_obed TEXT NOT NULL DEFAULT '14:00',
+                time_snack TEXT NOT NULL DEFAULT '16:00',
+                time_supper TEXT NOT NULL DEFAULT '17:30',
+                time_second_supper TEXT NOT NULL DEFAULT '21:00'
             )
         ''')
+        for _, time_column, default_time in NOTIFICATION_SETTINGS.values():
+            await conn.execute(
+                f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {time_column} TEXT NOT NULL DEFAULT '{default_time}'"
+            )
 
 async def upsert_user(user: types.User):
     async with db_pool.acquire() as conn:
@@ -122,12 +158,33 @@ async def send_scheduled_cat(text: str, column_name: str):
         except Exception as e:
             logging.error(f"Ошибка доставки до {user_id}: {e}")
 
+async def send_personalized_notifications():
+    current_time = datetime.now().strftime("%H:%M")
+    for subscription_column, (label, time_column, _) in NOTIFICATION_SETTINGS.items():
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT user_id FROM users WHERE {subscription_column} = TRUE AND {time_column} = $1",
+                current_time,
+            )
+
+        if not rows:
+            continue
+
+        cat_url = await get_cat_url()
+        message = NOTIFICATION_MESSAGES[subscription_column]
+        for row in rows:
+            try:
+                await bot.send_photo(chat_id=row['user_id'], photo=cat_url, caption=message)
+            except Exception as e:
+                logging.error(f"Ошибка доставки до {row['user_id']}: {e}")
+
 # --- КЛАВИАТУРЫ ---
 def get_main_keyboard():
     builder = ReplyKeyboardBuilder()
     builder.button(text="🐈 Кіт на вимогу")
     builder.button(text="⚙️ Мої підписки")
-    builder.adjust(2)
+    builder.button(text="⏰ Час оповіщень")
+    builder.adjust(2, 1)
     return builder.as_markup(resize_keyboard=True)
 
 def get_settings_keyboard(user_data: dict):
@@ -147,6 +204,16 @@ def get_settings_keyboard(user_data: dict):
     builder.button(text="Вимкни ВСЕ", callback_data="all_off")
     
     builder.adjust(2, 2, 2, 2, 2)
+    return builder.as_markup()
+
+def get_time_settings_keyboard(user_data: dict):
+    builder = InlineKeyboardBuilder()
+    for subscription_column, (label, time_column, _) in NOTIFICATION_SETTINGS.items():
+        builder.button(
+            text=f"{label}: {user_data[time_column]}",
+            callback_data=f"set_time_{subscription_column}",
+        )
+    builder.adjust(2, 2, 2, 2)
     return builder.as_markup()
 
 # --- ОБРАБОТЧИКИ ---
@@ -172,6 +239,51 @@ async def settings_menu(message: types.Message):
     user_data = await get_user_subs(message.from_user.id)
     await message.answer("Налаштуй свій ідеальний графік отримання кітов:", reply_markup=get_settings_keyboard(user_data))
 
+@dp.message(F.text == "⏰ Час оповіщень")
+async def time_settings_menu(message: types.Message):
+    await upsert_user(message.from_user)
+    user_data = await get_user_subs(message.from_user.id)
+    await message.answer("Обери оповіщення, час якого хочеш змінити:", reply_markup=get_time_settings_keyboard(user_data))
+
+@dp.callback_query(F.data.startswith("set_time_"))
+async def set_notification_time_handler(callback: types.CallbackQuery):
+    subscription_column = callback.data.removeprefix("set_time_")
+    if subscription_column not in NOTIFICATION_SETTINGS:
+        await callback.answer("Невідоме оповіщення", show_alert=True)
+        return
+
+    pending_time_settings[callback.from_user.id] = subscription_column
+    label = NOTIFICATION_SETTINGS[subscription_column][0]
+    await callback.message.answer(f"Надішли новий час для «{label}» у форматі ЧЧ:ММ (наприклад, 08:15).")
+    await callback.answer()
+
+@dp.message(F.text, ~F.text.startswith("/"))
+async def save_notification_time(message: types.Message):
+    subscription_column = pending_time_settings.get(message.from_user.id)
+    if not subscription_column:
+        return
+
+    try:
+        parsed_time = datetime.strptime(message.text.strip(), "%H:%M")
+        formatted_time = parsed_time.strftime("%H:%M")
+    except ValueError:
+        await message.answer("Невірний формат. Введи час як ЧЧ:ММ, наприклад 08:15.")
+        return
+
+    time_column = NOTIFICATION_SETTINGS[subscription_column][1]
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE users SET {time_column} = $1 WHERE user_id = $2",
+            formatted_time,
+            message.from_user.id,
+        )
+    pending_time_settings.pop(message.from_user.id, None)
+    user_data = await get_user_subs(message.from_user.id)
+    await message.answer(
+        f"Час збережено: {formatted_time}.",
+        reply_markup=get_time_settings_keyboard(user_data),
+    )
+
 @dp.callback_query(F.data.startswith("tgl_"))
 async def toggle_handler(callback: types.CallbackQuery):
     column = callback.data.replace("tgl_", "")
@@ -189,6 +301,16 @@ async def toggle_all_handler(callback: types.CallbackQuery):
     await callback.answer("Настройки обновлены!")
 
 # --- АДМИН ПАНЕЛЬ ---
+@dp.message(Command("help"), F.from_user.id == ADMIN_ID)
+async def admin_help(message: types.Message):
+    await message.answer(
+        f"Команди адміністратора (версія {BOT_VERSION}):\n\n"
+        "/help — показати цю довідку\n"
+        "/users — список користувачів (до 100)\n"
+        "/send <ID> <текст> — надіслати повідомлення користувачу\n"
+        "/broadcast <текст> — розіслати повідомлення всім користувачам"
+    )
+
 @dp.message(Command("users"), F.from_user.id == ADMIN_ID)
 async def admin_list_users(message: types.Message):
     async with db_pool.acquire() as conn:
@@ -202,7 +324,8 @@ async def admin_list_users(message: types.Message):
     for row in rows:
         username_str = f"@{row['username']}" if row['username'] else "Нет юзернейма"
         text += f"ID: `{row['user_id']}` | {username_str} | {row['first_name']}\n"
-    await message.answer(text)  # Просто убрали parse_mode
+        
+    await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Command("send"), F.from_user.id == ADMIN_ID)
 async def admin_send_private(message: types.Message):
@@ -245,13 +368,6 @@ async def admin_broadcast(message: types.Message):
             pass
     await message.answer(f"Рассылка завершена. Доставлено: {count} юзерам.")
 
-@dp.message()
-async def echo_all_unhandled(message: types.Message):
-    await message.answer(
-        f"🤖 Омнисія почув твій меседж: *'{message.text}'*, але я розумію тільки мову кітов!\n\n"
-        f"Використовуй меню знизу або команду /start",
-        parse_mode="Markdown"
-    )
 # --- ЗАПУСК ---
 async def main():
     global bot
@@ -266,20 +382,7 @@ async def main():
     bot = Bot(token=TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
     
-    jobs = [
-        ("04:30", "Доброго ранку! Прокидайся, котики вже не сплять! ☀️", "sub_morning"),
-        ("04:45", "Час сніданку. Кіт схвалює твою вівсянку! 🥣", "sub_breakfast"),
-        ("07:45", "Час ланчу! Перекуси, поки кіт не з'їв твій кактус. ☕", "sub_lunch"),
-        ("11:00", "ОБІД! Пора підкріпитися серйозно. 🍲", "sub_obed"),
-        ("13:00", "Полуденок. Час чаю та легких чухань за вушком. 🥨", "sub_snack"),
-        ("14:30", "Вечеря подана! Смачного. 🍗", "sub_supper"),
-        ("18:00", "Друга вечеря (нічний дожор). Ми нікому не скажемо. 🍕", "sub_second_supper"),
-        ("20:00", "На добраніч! Солодких снів. 🌙", "sub_night")
-    ]
-
-    for time, msg, column in jobs:
-        h, m = time.split(':')
-        scheduler.add_job(send_scheduled_cat, 'cron', hour=int(h), minute=int(m), args=[msg, column])
+    scheduler.add_job(send_personalized_notifications, 'cron', minute='*')
 
     scheduler.start()
     
